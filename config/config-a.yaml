@@ -1,0 +1,7 @@
+port: 3000
+heartbeat_interval: 5s
+heartbeat_timeout: 10s
+node: 
+peers: 
+  - localhost:3001
+  - localhost:3002
