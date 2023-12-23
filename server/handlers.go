@@ -80,12 +80,16 @@ func (s *Server) CandidateElection(c *fiber.Ctx) error {
 	return c.Status(fasthttp.StatusPreconditionFailed).JSON(&rs)
 }
 
+// Each process can vote for at most one candidate in a term on a first-come-first-served basis
 func (s *Server) processCandidateProposal(candidate string, term int) bool {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
+
+	// If candidate's term is less than the current term, it will be ignored means that the process votes for no candidate in the current term
 	if term <= s.term {
 		return false
 	}
+
 	s.nodeType = NodeFollower
 	s.leader = candidate
 	s.term = term

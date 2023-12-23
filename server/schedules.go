@@ -1,17 +1,67 @@
 package server
 
 import (
-	"encoding/json"
-	"fmt"
 	"sync"
 
 	"github.com/dyweb/gommon/errors"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/valyala/fasthttp"
 	"golang.org/x/exp/slog"
 	"shaaban.com/raft-leader-election/internal/scheduler"
 )
+
+// A follower expects to receive a periodic heartbeat from the leader containing the election term the leader was elected in.
+// If the follower doesn’t receive any heartbeat within a certain time period, a timeout fires and the leader is presumed dead
+func (s *Server) LeaderHeartbeatTimeOut() error {
+	var (
+		wg    sync.WaitGroup
+		err   []error
+		peers = s.cfg.Peers
+		term  = s.incrementTerm() // start a new election by incrementing current election term
+	)
+
+	// Update current node's state to candidate
+	// The process remains in the candidate state until one of three things happens:
+	// 1. The candidate wins the election
+	// 2. Another candidate wins the election
+	// 3. A period of time goes by with no winner
+	s.updateCurrentNodeToCandidate()
+
+	wg.Add(len(peers))
+
+	for _, peer := range peers {
+		go func(peer string) {
+			defer wg.Done()
+
+			// Send candidate proposal to peers
+			e := s.sendLeaderElectionToCandidates(peer, term)
+
+			if e != nil {
+				err = append(err, e)
+			}
+
+		}(peer)
+	}
+
+	wg.Wait()
+
+	if len(err) > len(peers)/2 {
+		// The candidate loses the election or there is no winner
+		return errors.New("error encountered when sending candidate proposal to peers")
+	}
+
+	// The candidate wins the election and transition to leader state
+	s.upgradeSelfNodeToLeader()
+
+	return nil
+}
+
+func (s *Server) leaderHeartbeatTimeoutErrorFunc(err error) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.nodeType = NodeFollower
+
+	slog.Error("error encountered on task leader_heartbeat_timeout", "error", err)
+}
 
 func (s *Server) heartbeatFunc() error {
 	var (
@@ -42,78 +92,8 @@ func (s *Server) heartbeatFunc() error {
 	return nil
 }
 
-func (s *Server) sendHeartbeatToPeer(peer string, term int) (err error) {
-	// TODO
-	return nil
-}
-
 func (s *Server) heartbeatErrorFunc(err error) {
 	// TODO
-}
-
-func (s *Server) LeaderHeartbeatTimeOut() error {
-	var (
-		wg    sync.WaitGroup
-		err   []error
-		peers = s.cfg.Peers
-		term  = s.incrementTerm()
-	)
-
-	wg.Add(len(peers))
-
-	for _, peer := range peers {
-		go func(peer string) {
-			defer wg.Done()
-
-			e := s.sendLeaderElectionToCandidates(peer, term)
-
-			if e != nil {
-				err = append(err, e)
-			}
-
-		}(peer)
-	}
-
-	wg.Wait()
-
-	if len(err) > len(peers)/2 {
-		return errors.New("error encountered when sending candidate proposal to peers")
-	}
-
-	s.upgradeSelfNodeToLeader()
-
-	return nil
-}
-
-func (s *Server) sendLeaderElectionToCandidates(peer string, term int) (err error) {
-	client := fiber.AcquireClient()
-	defer fiber.ReleaseClient(client)
-
-	agent := client.Post(fmt.Sprintf("http://%s/candidate/proposal", peer)).JSON(&CandidateProposalReq{
-		Candidate: s.cfg.Node,
-		Term:      term,
-	})
-
-	rs := fiber.AcquireResponse()
-	defer fiber.ReleaseResponse(rs)
-	if err = fasthttp.Do(agent.Request(), rs); err != nil {
-		return err
-	}
-	if rs.StatusCode() != fasthttp.StatusOK {
-		err = fmt.Errorf("status code %d", rs.StatusCode())
-		return err
-	}
-
-	var res CandidateProposalRes
-	if err = json.Unmarshal(rs.Body(), &res); err != nil {
-		return err
-	}
-	if !res.Ack {
-		err = fmt.Errorf("failed to accept proposal from peer %s for term %d", peer, term)
-		return err
-	}
-
-	return nil
 }
 
 func (s *Server) incrementTerm() int {
@@ -128,6 +108,12 @@ func (s *Server) currTerm() int {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	return s.term
+}
+
+func (s *Server) updateCurrentNodeToCandidate() {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	s.nodeType = NodeCandidate
 }
 
 func (s *Server) upgradeSelfNodeToLeader() {
@@ -148,12 +134,4 @@ func (s *Server) upgradeSelfNodeToLeader() {
 
 	slog.Info("leader-candidate proposal successful; promoted self to leader", "node", s.cfg.Node)
 
-}
-
-func (s *Server) leaderHeartbeatTimeoutErrorFunc(err error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	s.nodeType = NodeFollower
-
-	slog.Error("error encountered on task leader_heartbeat_timeout", "error", err)
 }

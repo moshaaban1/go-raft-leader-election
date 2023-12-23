@@ -8,6 +8,10 @@ import (
 	"shaaban.com/raft-leader-election/internal/scheduler"
 )
 
+// Raft leader election algorithm is implemented with a state machine in which a process is in one of three states:
+// 1. Follower state: process recognizes another one as the leader
+// 2. Candidate state: process proposes itself as the leader
+// 3. Leader state: process is the leader
 const (
 	NodeLeader    = "leader"
 	NodeFollower  = "follower"
@@ -32,6 +36,7 @@ type Server struct {
 func New(config *Config) *Server {
 
 	s := &Server{
+		// All processes begin their journey as followers.
 		nodeType: NodeFollower,
 		app: fiber.New(fiber.Config{
 			EnablePrintRoutes: true,
@@ -43,6 +48,7 @@ func New(config *Config) *Server {
 	s.app.Post("/leader/heartbeat", s.LeaderHeartbeat)
 	s.app.Post("/candidate/election", s.CandidateElection)
 
+	// If the follower doesn’t receive any heartbeat within a certain time period, a timeout fires and the leader is presumed dead.
 	err := s.scheduler.AddTask(LeaderHeartBeatTimeOut, &scheduler.Task{
 		Interval: s.cfg.HeartBeatTimeout,
 		Execute:  s.LeaderHeartbeatTimeOut,
